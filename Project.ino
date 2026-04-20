@@ -1,251 +1,296 @@
-  #include <ESP32Servo.h>
-  #include <Wire.h>               //I2C
-  #include <LiquidCrystal_I2C.h>  //LCD controll
-  #include <SPI.h>
-  #include <MFRC522.h>
-  //==========WEB SERVER INIT========
-  //Thư viện điều khiển wifi và serverweb
-  #include <WiFi.h>
-  #include <WebServer.h>
+#include <ESP32Servo.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <WiFi.h>
+#include <WebServer.h>
 
-  const char* ssid = "SmartGara_WIFI";
-  const char* pass = "12345678";
+// ================= WIFI + WEB =================
+const char* ssid = "SmartDoor_WIFI";
+const char* pass = "12345678";
 
-  //Mở cổng port mặc định của http là 80;
-  WebServer server(80);
-  //=======END WEB SERVER INIT=======
+WebServer server(80);
 
-  //=======GIAO DIEN VA XU LY WEB SERVER=====
-  void handleRoot() {
+// ================= LCD =================
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-    String html = R"rawliteral(
-  <!DOCTYPE html>
-  <html>
-  <head>
-  <title>DOOR Control</title>
-  </head>
+// ================= RFID =================
+#define SS_PIN 5
+#define RST_PIN 17
 
-  <body>
+MFRC522 rfid(SS_PIN, RST_PIN);
+String masterUID = "FABA145";
 
-  <h1>GARA DOOR MONITOR</h1>
+// ================= PIN =================
+const int led = 32;
+const int trigPin = 25;
+const int echoPin = 26;
+const int servoPin = 27;
 
-  <button onclick="doorOn()">DOOR ON</button>
-  <br><br>
-  <button onclick="doorOff()">DOOR OFF</button>
+// ================= SERVO =================
+Servo doorServo;
 
-  <script>
+// ================= STATE =================
+bool doorOpen = false;
+bool carDetected = false;
+float distance = 0;
 
-  function doorOn(){
-    fetch("/on");
-  }
+// =========================================
+//                WEB PAGE
+// =========================================
+void handleRoot() {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DOOR Control</title>
+</head>
+<body>
+    <h1> SMART HOME DOOR </h1>
 
-  function doorOff(){
-    fetch("/off");
-  }
+    <input type="password" id="pin" placeholder="Enter PIN">
+    <button onclick="login()">LOGIN</button>
 
-  </script>
+    <br><br>
 
-  </body>
-  </html>
-  )rawliteral";
+    <div id="doorControl" style="display:none;">
+        <button onclick="doorOn()">DOOR ON</button>
+        <br><br>
+        <button onclick="doorOff()">DOOR OFF</button>
+    </div>
 
-    /*Gửi phản hồi lên trình duyệt
-    200: httpStatus
-    kiểu trả về: text/html*/
-    server.send(200, "text/html", html);
-  }
+    <p id="message"></p>
 
+<script>
+    const correctPIN = "1234";
+    let isLoggedIn = false;
 
-  LiquidCrystal_I2C lcd(0x27, 16, 2);  //Init LCD, 0x27 is address I2C
+    function login() {
+        let pin = document.getElementById("pin").value;
+        let msg = document.getElementById("message");
 
-  //======Khai bao chan RFID
-  #define SS_PIN 5
-  #define RST_PIN 17
-
-  MFRC522 rfid(SS_PIN, RST_PIN);
-
-  String masterUID = "FABA145";
-
-  //=====Khai bao chan ultra, servo
-  const int trigPin = 25;
-  const int echoPin = 26;
-  const int servoPin = 27;
-
-  Servo doorServo;
-
-  float distance;
-  bool doorOpen = false;
-  bool carDetected = false;  //Phan hien thay doi nhanh
-  float readDistance() {
-
-    long duration;
-
-    digitalWrite(trigPin, LOW);
-    delayMicroseconds(2);
-
-    digitalWrite(trigPin, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(trigPin, LOW);
-
-    duration = pulseIn(echoPin, HIGH);
-
-    float dis = duration * 0.034 / 2;
-
-    return dis;
-  }
-
-  void moCua() {
-
-    Serial.println("Mo cua");
-
-    for (int angle = 0; angle <= 180; angle++) {
-      doorServo.write(angle);
-      delay(10);  // càng lớn càng chậm
+        if (pin === correctPIN) {
+            isLoggedIn = true;
+            document.getElementById("doorControl").style.display = "block";
+            msg.innerText = "Login success";
+        } else {
+            msg.innerText = "Wrong PIN";
+        }
     }
 
-    doorOpen = true;
-  }
+    function doorOn() {
+        if (!isLoggedIn) {
+            alert("Please login first");
+            return;
+        }
 
-  void dongCua() {
-
-    Serial.println("Dong cua sau 3s");
-
-    delay(3000);
-
-    for (int angle = 180; angle >= 0; angle--) {
-      doorServo.write(angle);
-      delay(10);
+        fetch("/on");
     }
 
-    doorOpen = false;
-  }
+    function doorOff() {
+        if (!isLoggedIn) {
+            alert("Please login first");
+            return;
+        }
 
-
-  //=======HANDLE RFID===========
-  //=============================
-  //========== DOC UID ==========
-  String readCardUID() {
-
-    if (!rfid.PICC_IsNewCardPresent())
-      return "";
-
-    if (!rfid.PICC_ReadCardSerial())
-      return "";
-
-    String uid = "";
-
-    for (byte i = 0; i < rfid.uid.size; i++) {
-      uid += String(rfid.uid.uidByte[i], HEX);
+        fetch("/off");
     }
+</script>
+</body>
+</html>
+)rawliteral";
 
-    uid.toUpperCase();
+  server.send(200, "text/html", html);
+}
 
-    return uid;
+// =========================================
+//            DISTANCE SENSOR
+// =========================================
+float readDistance() {
+  long duration;
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH);
+
+  return duration * 0.034 / 2;
+}
+
+// =========================================
+//              DOOR CONTROL
+// =========================================
+void moCua() {
+  // Nếu cửa đang mở thì không làm gì
+  if (doorOpen) {
+    Serial.println("Door already OPEN");
+    return;
   }
 
-  //========== KIEM TRA ==========
-  bool checkCard(String uid) {
+  digitalWrite(led, LOW);
+  Serial.println("Opening door...");
 
-    if (uid == masterUID) {
-      return true;
-    }
-
-    return false;
+  for (int angle = 0; angle <= 180; angle++) {
+    doorServo.write(angle);
+    delay(10);
   }
 
-  //========== XU LY RFID ==========
-  void handleRFID() {
+  doorOpen = true;
+  digitalWrite(led, HIGH);
 
-    String uid = readCardUID();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Door OPEN");
+}
 
-    if (uid == "") return;
+void dongCua() {
+  digitalWrite(led, LOW);
+  delay(2000);
+  // Nếu cửa đang đóng thì không làm gì
+  if (!doorOpen) {
+    Serial.println("Door already CLOSED");
+    return;
+  }
+  Serial.println("Closing door...");
 
-    Serial.print("UID: ");
-    Serial.println(uid);
+  for (int angle = 180; angle >= 0; angle--) {
+    doorServo.write(angle);
+    delay(10);
+  }
 
-    if (checkCard(uid) && doorOpen == false) {
+  doorOpen = false;
+  digitalWrite(led, HIGH);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Door CLOSED");
+}
+
+// =========================================
+//                RFID
+// =========================================
+String readCardUID() {
+  if (!rfid.PICC_IsNewCardPresent()) return "";
+  if (!rfid.PICC_ReadCardSerial()) return "";
+
+  String uid = "";
+
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    uid += String(rfid.uid.uidByte[i], HEX);
+  }
+
+  uid.toUpperCase();
+  return uid;
+}
+
+bool checkCard(String uid) {
+  return uid == masterUID;
+}
+
+void handleRFID() {
+  String uid = readCardUID();
+
+  if (uid == "") return;
+
+  Serial.print("UID: ");
+  Serial.println(uid);
+
+//Neu UID dung he thong cho phep truy cap
+  if (checkCard(uid)) {
+    // Quét lần 1 neu UID dung -> mở
+    if (!doorOpen) {
       lcd.clear();
       lcd.setCursor(0, 0);
-      lcd.print("Wellcome bro");
+      lcd.print("Access OK");
       lcd.setCursor(0, 1);
-      lcd.print("Corrected");
+      lcd.print("Opening...");
       moCua();
-      delay(3000);
+    } else { // Quét lần 2 -> đóng
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Scan Again");
       lcd.setCursor(0, 1);
-      lcd.print("Scan card...");
-      Serial.println("OK");
-    } else {
-      lcd.setCursor(0, 1);
-      lcd.print("Wrong");
-      delay(3000);
-      lcd.setCursor(0, 1);
-      lcd.print("Scan card...");
-    }
-
-    delay(1500);
-  }
-
-  void setup() {
-    Serial.begin(115200);
-
-    //=======ULtrasonic set up=====
-    pinMode(trigPin, OUTPUT);
-    pinMode(echoPin, INPUT);
-
-    //====== SERVO setUP=========
-    doorServo.attach(servoPin);
-    doorServo.write(0);  // cửa đóng
-
-    //=========SET UP RFID
-    SPI.begin();
-    rfid.PCD_Init();
-    lcd.setCursor(0, 1);
-    Serial.println("Scan card...");
-
-    //=====LCD Set Up=======
-    lcd.init();
-    lcd.backlight();
-
-    lcd.setCursor(0, 0);
-    lcd.print("Wellcome bro");
-
-    //======SETUP WEB=======
-    WiFi.softAP(ssid, pass);
-    Serial.println(WiFi.softAPIP());  //lấy IP của trang
-
-    server.on("/", handleRoot);  //Khi truy cập đúng IP; thì gọi handleRoot. gọi trang
-    server.on("/on", moCua);
-    server.on("/off", dongCua);
-    //khởi tạo server
-    server.begin();
-  }
-
-  void loop() {
-    //=======WEB HANDLE====
-    server.handleClient();
-    //=======DI TU TRONG NHA RA============
-    distance = readDistance();
-    Serial.print("Distance: ");
-    Serial.println(distance);
-
-    // phát hiện xe tới cửa
-    if (distance < 10) {
-      carDetected = true;
-
-      if (doorOpen == false) {
-        moCua();
-      }
-    }
-
-    // xe đã đi qua cảm biến
-    if (distance >= 12 && doorOpen == true && carDetected == true) {
+      lcd.print("Closing...");
       dongCua();
-      carDetected = false;
     }
-    //===========KET THUC DI TU TRONG NHA RA
-    //====================================//
-    //===========DI TU NGOAI VAO BANG RFID==========
-    handleRFID();
-
-    delay(200);
+  } else {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Wrong Card");
+    Serial.println("Wrong");
   }
+
+  delay(1500);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Scan card...");
+}
+
+// =========================================
+//                SETUP
+// =========================================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(led, OUTPUT);
+  digitalWrite(led, HIGH);
+
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  doorServo.attach(servoPin);
+  doorServo.write(0);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Scan card...");
+
+  SPI.begin();
+  rfid.PCD_Init();
+
+  WiFi.softAP(ssid, pass);
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", handleRoot);
+  server.on("/on", moCua);
+  server.on("/off", dongCua);
+  server.begin();
+}
+
+// =========================================
+//                 LOOP
+// =========================================
+void loop() {
+  server.handleClient();
+
+  distance = readDistance();
+
+  Serial.print("Distance: ");
+  Serial.println(distance);
+
+  // Xe tới -> mở
+  if (distance < 10) {
+    carDetected = true;
+
+    if (!doorOpen) {
+      moCua();
+    }
+  }
+
+  // Xe đi qua -> đóng
+  if (distance >= 12 && doorOpen && carDetected) {
+    dongCua();
+    carDetected = false;
+  }
+
+  handleRFID();
+
+  delay(200);
+}
